@@ -1,0 +1,32 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+
+# ML model weights (large binary files — download separately)
+*.pt
+*.pth
+*.onnx
+data/
+ml/data_cache/
+ml/runs/
+
+# Backend generated
+backend/static/
+backend/alerts/*.jpg
+backend/alerts/*.wav
+backend/media/
+
+# OS
+.DS_Store
+Thumbs.db
