@@ -22,7 +22,6 @@ ml/data_cache/
 ml/runs/
 
 # Backend generated
-backend/static/
 backend/alerts/*.jpg
 backend/alerts/*.wav
 backend/media/
