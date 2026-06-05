@@ -18,3 +18,7 @@ def get_db():
 
 def get_alerts_collection():
     return get_db()["alerts"]
+
+
+def get_faces_collection():
+    return get_db()["faces"]

@@ -97,8 +97,11 @@ export default function Dashboard() {
           // Also refresh stat counters & chart data straight away
           fetchDataRef.current()
 
-          if (!['normal', 'normalvideos'].includes(alert.type.toLowerCase())) {
-            const msg = `${alert.type.toUpperCase()} detected (${(alert.confidence * 100).toFixed(0)}% conf)`
+          if (!['normal', 'normalvideos', 'friendly'].includes(alert.type.toLowerCase())) {
+            const who = alert.detected_name && alert.detected_name !== 'Unknown'
+              ? alert.detected_name
+              : alert.type.toUpperCase()
+            const msg = `${who} detected (${(alert.confidence * 100).toFixed(0)}% conf)`
             setToast(msg)
             if (toastTimer.current) clearTimeout(toastTimer.current)
             toastTimer.current = setTimeout(() => setToast(null), 5000)
@@ -125,13 +128,14 @@ export default function Dashboard() {
   }, []) // stable — fetchDataRef is a ref, not a dep
 
   const latest = alerts[0] ?? null
-  const isAlert = latest && !['normal', 'normalvideos'].includes(latest.type.toLowerCase())
+  const isAlert = latest && !['normal', 'normalvideos', 'friendly'].includes(latest.type.toLowerCase())
+  const SAFE_TYPES = ['normal', 'normalvideos', 'friendly']
   const threatsToday = alerts.filter(a => {
     const today = new Date().toDateString()
-    return new Date(a.timestamp).toDateString() === today && !['normal', 'normalvideos'].includes(a.type.toLowerCase())
+    return new Date(a.timestamp).toDateString() === today && !SAFE_TYPES.includes(a.type.toLowerCase())
   }).length
   const detectionRate = alerts.length > 0
-    ? Math.round((alerts.filter(a => !['normal', 'normalvideos'].includes(a.type.toLowerCase())).length / alerts.length) * 100)
+    ? Math.round((alerts.filter(a => !SAFE_TYPES.includes(a.type.toLowerCase())).length / alerts.length) * 100)
     : 0
 
   return (
@@ -247,7 +251,9 @@ export default function Dashboard() {
                     {a.type}
                   </span>
                   <p className="text-gray-400 truncate">
-                    {a.source} — {(a.confidence * 100).toFixed(0)}% conf
+                    {a.detected_name && a.detected_name !== 'Unknown'
+                      ? a.detected_name
+                      : a.source} — {(a.confidence * 100).toFixed(0)}% conf
                   </p>
                 </div>
                 <span className="text-gray-400 whitespace-nowrap shrink-0">{formatTime(a.timestamp)}</span>

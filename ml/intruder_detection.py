@@ -1,12 +1,13 @@
 """
-Real-time audio-visual intruder detection with late fusion.
+Real-time audio-visual intruder detection with face recognition.
 
 Captures webcam video + microphone audio simultaneously.
 Every second:
-  - YOLOv5-cls classifies the current frame (14 crime classes)
+  - face_recognition identifies faces in the current frame
+    - Known face  → label as friendly (green box)
+    - Unknown face → fire intruder alert + send cropped face photo to backend
   - EfficientNet-B0 audio model scores the audio chunk (gunshot/intrusion vs. normal)
-  - Late fusion fires an alert when either model exceeds its confidence threshold
-  - Alert is POSTed to the FastAPI backend
+  - Audio alert fires independently when threshold is exceeded
 
 Usage:
     source ../venv/bin/activate
@@ -31,25 +32,56 @@ import torch
 import torch.nn as nn
 from torchvision import models
 
+import face_recognition
+
 from utils.audio_utils import load_audio, pad_or_trim, waveform_to_melspec, TARGET_SR
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 AUDIO_MODEL_PATH = Path(__file__).parent / "models" / "audio_classifier.pt"
-VIDEO_MODEL_PATH = Path(__file__).parent / "models" / "yolov5_crime_cls.pt"
 
-AUDIO_THRESHOLD = 0.50   # lowered so glass-breaking / screaming / intrusion sounds trigger alerts
-VIDEO_THRESHOLD = 0.70
-AUDIO_CHUNK_S   = 1.0
-
-VIDEO_CLASSES = [
-    "abuse", "arrest", "arson", "assault", "burglary",
-    "explosion", "fighting", "normal", "roadaccidents",
-    "robbery", "shooting", "shoplifting", "stealing", "vandalism",
-]
+AUDIO_THRESHOLD  = 0.50
+FACE_THRESHOLD   = 0.55   # Euclidean distance — lower = stricter match
+AUDIO_CHUNK_S    = 1.0
+ALERT_COOLDOWN_S = 10.0   # minimum seconds between intruder alerts
 
 DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
+
+# ---------------------------------------------------------------------------
+# Enrolled faces — refreshed from backend every 30 s
+# ---------------------------------------------------------------------------
+
+_known_encodings: list[np.ndarray] = []
+_known_names:     list[str]        = []
+_encodings_lock = threading.Lock()
+
+
+def _auth_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def refresh_encodings(api_base: str, token: str):
+    """Pull latest enrolled face encodings from the backend."""
+    try:
+        r = httpx.get(f"{api_base}/faces/encodings",
+                      headers=_auth_headers(token), timeout=5.0)
+        data = r.json()
+        with _encodings_lock:
+            _known_encodings.clear()
+            _known_names.clear()
+            for item in data:
+                _known_encodings.append(np.array(item["encoding"], dtype=np.float64))
+                _known_names.append(item["name"])
+        print(f"[FACE] {len(_known_names)} enrolled: {_known_names or ['(none yet)']}")
+    except Exception as e:
+        print(f"[FACE] Could not fetch encodings: {e}")
+
+
+def _encoding_refresh_loop(api_base: str, token: str):
+    while True:
+        time.sleep(30)
+        refresh_encodings(api_base, token)
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +91,7 @@ DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
 class AudioCapture:
     def __init__(self, sr: int = TARGET_SR, device=None):
         self._sr = sr
-        self._ring = np.zeros(sr * 5, dtype=np.float32)  # 5-second ring buffer
+        self._ring = np.zeros(sr * 5, dtype=np.float32)
         self._write_pos = 0
         self._lock = threading.Lock()
         self._buf: queue.Queue = queue.Queue(maxsize=5)
@@ -72,10 +104,8 @@ class AudioCapture:
 
     def _callback(self, indata, frames, time_info, status):
         chunk = indata[:, 0].copy()
-        # Inference queue
         if not self._buf.full():
             self._buf.put_nowait(chunk)
-        # Update ring buffer
         with self._lock:
             n = len(chunk)
             ring_len = len(self._ring)
@@ -89,7 +119,6 @@ class AudioCapture:
             self._write_pos = end % ring_len
 
     def get_last_5s(self) -> np.ndarray:
-        """Return the last 5 seconds of audio in chronological order."""
         with self._lock:
             return np.concatenate([
                 self._ring[self._write_pos:],
@@ -105,7 +134,6 @@ class AudioCapture:
 
 
 def _wav_bytes(samples: np.ndarray, sr: int = TARGET_SR) -> bytes:
-    """Convert float32 numpy array to WAV bytes (PCM 16-bit mono)."""
     samples_i16 = (samples * 32767).clip(-32768, 32767).astype(np.int16)
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
@@ -117,7 +145,7 @@ def _wav_bytes(samples: np.ndarray, sr: int = TARGET_SR) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Model loading
+# Audio model
 # ---------------------------------------------------------------------------
 
 def load_audio_model() -> nn.Module:
@@ -129,49 +157,82 @@ def load_audio_model() -> nn.Module:
     return model
 
 
-def load_video_model():
-    from ultralytics import YOLO
-    return YOLO(str(VIDEO_MODEL_PATH))
-
-
-# ---------------------------------------------------------------------------
-# Inference
-# ---------------------------------------------------------------------------
-
 @torch.no_grad()
 def infer_audio(model: nn.Module, chunk: np.ndarray) -> float:
     chunk = pad_or_trim(chunk, TARGET_SR)
-    spec = waveform_to_melspec(chunk).unsqueeze(0).to(DEVICE)
+    spec  = waveform_to_melspec(chunk).unsqueeze(0).to(DEVICE)
     logit = model(spec).squeeze()
     return float(torch.sigmoid(logit).cpu())
 
 
-def infer_video(video_model, frame: np.ndarray) -> tuple[str, float]:
-    results = video_model(frame, verbose=False)
-    probs = results[0].probs
-    top_idx  = int(probs.top1)
-    top_conf = float(probs.top1conf)
-    top_class = VIDEO_CLASSES[top_idx] if top_idx < len(VIDEO_CLASSES) else "unknown"
-    return top_class, top_conf
+# ---------------------------------------------------------------------------
+# Face recognition inference
+# ---------------------------------------------------------------------------
+
+def infer_faces(frame: np.ndarray) -> list[dict]:
+    """
+    Detect and identify all faces in a BGR frame.
+    Returns list of {name, confidence, location: (top, right, bottom, left)}.
+    """
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    locations = face_recognition.face_locations(rgb, model="hog")
+    if not locations:
+        return []
+
+    encodings = face_recognition.face_encodings(rgb, locations)
+
+    with _encodings_lock:
+        known_enc   = list(_known_encodings)
+        known_names = list(_known_names)
+
+    results = []
+    for enc, loc in zip(encodings, locations):
+        if known_enc:
+            distances = face_recognition.face_distance(known_enc, enc)
+            best_idx  = int(np.argmin(distances))
+            best_dist = float(distances[best_idx])
+            if best_dist < FACE_THRESHOLD:
+                name       = known_names[best_idx]
+                confidence = round(1.0 - best_dist, 4)
+            else:
+                name       = "Unknown"
+                confidence = round(1.0 - best_dist, 4)
+        else:
+            name       = "Unknown"
+            confidence = 0.9
+
+        results.append({"name": name, "confidence": confidence, "location": loc})
+
+    return results
+
+
+def crop_face(frame: np.ndarray, location: tuple) -> np.ndarray:
+    """Crop and return a face region with a small padding."""
+    top, right, bottom, left = location
+    h, w = frame.shape[:2]
+    pad = 20
+    t = max(0, top - pad)
+    r = min(w, right + pad)
+    b = min(h, bottom + pad)
+    l = max(0, left - pad)
+    return frame[t:b, l:r]
 
 
 # ---------------------------------------------------------------------------
 # Alert dispatch
 # ---------------------------------------------------------------------------
 
-def _auth_headers(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"} if token else {}
-
-
 def dispatch_alert(api_base: str, token: str, alert_type: str,
                    confidence: float, source: str,
+                   detected_name: str | None = None,
                    frame: np.ndarray | None = None,
                    audio_cap: "AudioCapture | None" = None):
     payload = {
-        "timestamp":  datetime.now(timezone.utc).isoformat(),
-        "type":       alert_type,
-        "confidence": round(confidence, 4),
-        "source":     source,
+        "timestamp":     datetime.now(timezone.utc).isoformat(),
+        "type":          alert_type,
+        "confidence":    round(confidence, 4),
+        "source":        source,
+        "detected_name": detected_name,
     }
     if frame is not None:
         _, buf = cv2.imencode(".jpg", frame)
@@ -192,14 +253,13 @@ def dispatch_alert(api_base: str, token: str, alert_type: str,
 
 
 def push_frame(api_base: str, token: str, frame: np.ndarray):
-    """Send the current video frame to the backend MJPEG stream endpoint."""
     try:
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
         b64 = base64.b64encode(buf).decode()
         httpx.post(f"{api_base}/stream/frame", json={"frame_b64": b64},
                    headers=_auth_headers(token), timeout=2.0)
     except Exception:
-        pass  # stream push is best-effort
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -208,82 +268,130 @@ def push_frame(api_base: str, token: str, frame: np.ndarray):
 
 def run(api_base: str, token: str, audio_device=None, camera: int = 0):
     if not AUDIO_MODEL_PATH.exists():
-        print(f"ERROR: Audio model not found — run train_audio.py first.")
-        return
-    if not VIDEO_MODEL_PATH.exists():
-        print(f"ERROR: Video model not found — run train_video.py first.")
+        print("ERROR: Audio model not found — run train_audio.py first.")
         return
 
-    # Show which mic is being used
-    import sounddevice as sd
     dev_info = sd.query_devices(audio_device, kind="input") if audio_device is not None \
                else sd.query_devices(kind="input")
     print(f"  Microphone: [{audio_device}] {dev_info['name']}")
 
+    # Load enrolled faces on startup, then refresh in background
+    refresh_encodings(api_base, token)
+    threading.Thread(target=_encoding_refresh_loop, args=(api_base, token),
+                     daemon=True).start()
+
     audio_model = load_audio_model()
-    video_model = load_video_model()
     audio_cap   = AudioCapture(device=audio_device)
     cap         = cv2.VideoCapture(camera)
 
-    if not cap.isOpened():
-        print("ERROR: Cannot open webcam.")
-        return
+    camera_ok = cap.isOpened()
+    if not camera_ok:
+        print(f"WARNING: Cannot open webcam (index {camera}) — running in audio-only mode.")
+    else:
+        print(f"  Camera: index {camera} opened.")
 
     audio_cap.start()
     print(f"\n=== Intruder Detection Running (device: {DEVICE}) ===")
-    print("Press 'q' in the video window to quit.\n")
+    if camera_ok:
+        print("Press 'q' in the video window to quit.\n")
+    else:
+        print("Audio-only mode active. Press Ctrl+C to quit.\n")
 
-    last_infer = 0.0
+    last_infer      = 0.0
+    last_alert_time = 0.0  # cooldown tracker for intruder alerts
 
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+            frame = None
+            if camera_ok:
+                ret, frame = cap.read()
+                if not ret:
+                    print("WARNING: Lost camera feed — switching to audio-only mode.")
+                    camera_ok = False
+                    frame = None
 
             now = time.time()
             if now - last_infer >= AUDIO_CHUNK_S:
                 last_infer = now
                 alerts = []
 
+                # --- Audio inference ---
                 chunk = audio_cap.get_chunk()
                 if chunk is None:
                     print("[AUDIO] no chunk yet — waiting for mic buffer...")
                 else:
-                    prob = infer_audio(audio_model, chunk)
+                    prob  = infer_audio(audio_model, chunk)
                     label = "ALERT ⚠" if prob > AUDIO_THRESHOLD else "ok"
                     print(f"[AUDIO] prob={prob:.3f}  threshold={AUDIO_THRESHOLD}  → {label}")
                     if prob > AUDIO_THRESHOLD:
-                        alerts.append(("gunshot", prob, "audio"))
+                        alerts.append(("gunshot", prob, "audio", None, None))
 
-                v_class, v_conf = infer_video(video_model, frame)
-                if v_class != "normal" and v_conf > VIDEO_THRESHOLD:
-                    alerts.append((v_class, v_conf, "video"))
-                    print(f"[VIDEO ALERT] {v_class}  conf={v_conf:.3f}")
+                # --- Face recognition ---
+                if frame is not None:
+                    face_results = infer_faces(frame)
 
-                if len(alerts) == 2:
-                    best = max(alerts, key=lambda a: a[1])
-                    dispatch_alert(api_base, token, best[0], best[1], "both", frame, audio_cap)
-                elif len(alerts) == 1:
-                    a_type, a_conf, a_src = alerts[0]
-                    dispatch_alert(api_base, token, a_type, a_conf, a_src, frame, audio_cap)
+                    for fr in face_results:
+                        name     = fr["name"]
+                        conf     = fr["confidence"]
+                        loc      = fr["location"]
+                        top, right, bottom, left = loc
 
-                color = (0, 0, 255) if v_class != "normal" else (0, 200, 0)
-                cv2.putText(frame, f"{v_class.upper()} {v_conf:.2f}",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                        if name == "Unknown":
+                            color = (0, 0, 255)
+                            label_text = f"UNKNOWN  {conf:.2f}"
+                            face_crop = crop_face(frame, loc)
+                            alerts.append(("intruder", conf, "video", "Unknown", face_crop))
+                        else:
+                            color = (0, 200, 0)
+                            label_text = f"{name}  {conf:.2f}"
 
-                # Push annotated frame to the backend for live stream viewers
-                if api_base:
+                        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+                        cv2.putText(frame, label_text, (left, top - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2)
+
+                    if not face_results:
+                        cv2.putText(frame, "No face detected", (10, 30),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (180, 180, 180), 2)
+
+                # --- Dispatch alerts ---
+                intruder_alerts = [a for a in alerts if a[2] == "video" and a[0] == "intruder"]
+                audio_alerts    = [a for a in alerts if a[2] == "audio"]
+
+                # Intruder alert — respect cooldown to avoid spam
+                if intruder_alerts and (now - last_alert_time) >= ALERT_COOLDOWN_S:
+                    best = max(intruder_alerts, key=lambda a: a[1])
+                    src  = "both" if audio_alerts else "video"
+                    dispatch_alert(api_base, token, best[0], best[1], src,
+                                   detected_name=best[3],
+                                   frame=best[4],  # cropped face photo
+                                   audio_cap=audio_cap if audio_alerts else None)
+                    last_alert_time = now
+                    print(f"[INTRUDER ALERT] conf={best[1]:.3f}  source={src}")
+
+                # Audio-only alert (no face detection active)
+                elif audio_alerts and not intruder_alerts:
+                    a_type, a_conf, a_src, _, _ = audio_alerts[0]
+                    dispatch_alert(api_base, token, a_type, a_conf, a_src,
+                                   audio_cap=audio_cap)
+
+                # Push annotated frame to MJPEG stream
+                if frame is not None and api_base:
                     threading.Thread(
-                        target=push_frame, args=(api_base, token, frame.copy()), daemon=True
+                        target=push_frame, args=(api_base, token, frame.copy()),
+                        daemon=True,
                     ).start()
 
-            cv2.imshow("Intruder Detection", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
-                break
+            if frame is not None:
+                cv2.imshow("Intruder Detection", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            else:
+                time.sleep(0.1)
+
     finally:
         audio_cap.stop()
-        cap.release()
+        if cap.isOpened():
+            cap.release()
         cv2.destroyAllWindows()
         print("Stopped.")
 

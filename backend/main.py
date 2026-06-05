@@ -40,8 +40,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Streamin
 from fastapi.security import OAuth2PasswordRequestForm
 
 from auth import authenticate_user, create_access_token, get_current_user, verify_token
-from database import get_alerts_collection
-from models import AlertIn, AlertOut, CameraIn, DeviceConfig, FrameIn, TokenResponse
+from database import get_alerts_collection, get_faces_collection
+from models import AlertIn, AlertOut, CameraIn, DeviceConfig, FaceEncoding, FaceIn, FaceOut, FrameIn, TokenResponse
 
 MEDIA_DIR = Path(__file__).parent / "alerts"
 MEDIA_DIR.mkdir(exist_ok=True)
@@ -66,6 +66,17 @@ try:
     YOLO_AVAILABLE = True
 except ImportError:
     YOLO_AVAILABLE = False
+
+try:
+    import face_recognition as _fr
+    FACE_RECOGNITION_AVAILABLE = True
+except ImportError:
+    FACE_RECOGNITION_AVAILABLE = False
+
+FACES_DIR = Path(__file__).parent / "faces"
+FACES_DIR.mkdir(exist_ok=True)
+
+MAX_ALERT_FRAMES = 500  # max face/alert images kept on disk
 
 _yolo_cls_model = None   # classification (crime classes)
 _yolo_det_model = None   # object detection (bounding boxes)
@@ -179,6 +190,14 @@ async def store_alert(
         from bson import ObjectId as _ObjId
         await col.update_one({"_id": _ObjId(inserted_id)}, {"$set": media_updates})
 
+    # Enforce disk cap — remove oldest frames if over limit
+    frame_files = sorted(MEDIA_DIR.glob("frame_*.jpg"), key=lambda f: f.stat().st_mtime)
+    for old in frame_files[:-MAX_ALERT_FRAMES]:
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
     broadcast_doc = {**doc, "id": inserted_id}
     dead = []
     for ws in _alert_ws_clients:
@@ -281,40 +300,84 @@ async def webcam_detect(
     frame: FrameIn,
     _user: str = Depends(get_current_user),
 ):
-    """Run detection on a single base64-encoded JPEG frame from the browser webcam."""
-    if not YOLO_AVAILABLE:
-        return {
-            "type": "normal",
-            "confidence": 0.95,
-            "source": "video",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "note": "ML model not installed — install ultralytics for real detection",
-        }
-
+    """Run face recognition on a single base64-encoded JPEG frame from the browser webcam."""
     import cv2
     import numpy as np
 
     img_bytes = base64.b64decode(frame.frame_b64)
     img_array = np.frombuffer(img_bytes, dtype=np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    img_bgr   = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
 
-    model = _get_yolo()
-    results = model(img, verbose=False)
-    top_idx  = int(results[0].probs.top1)
-    confidence = float(results[0].probs.top1conf)
+    if not FACE_RECOGNITION_AVAILABLE:
+        return {
+            "type": "normal",
+            "confidence": 1.0,
+            "source": "video",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "detected_name": None,
+            "note": "face_recognition not installed — pip install face_recognition",
+        }
 
-    # Map index to crime class name (falls back to model's own name if out of range)
-    if top_idx < len(CRIME_CLASSES):
-        class_name = CRIME_CLASSES[top_idx]
-    else:
-        class_name = results[0].names.get(top_idx, "unknown")
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    locations = _fr.face_locations(img_rgb, model="hog")
 
-    return {
-        "type": class_name,
-        "confidence": confidence,
-        "source": "video",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
+    if not locations:
+        return {
+            "type": "normal",
+            "confidence": 1.0,
+            "source": "video",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "detected_name": None,
+        }
+
+    encodings = _fr.face_encodings(img_rgb, locations)
+
+    # Load enrolled faces from DB
+    col = get_faces_collection()
+    known_enc, known_names = [], []
+    async for doc in col.find():
+        known_enc.append(np.array(doc["encoding"]))
+        known_names.append(doc["name"])
+
+    results = []
+    for enc in encodings:
+        if known_enc:
+            distances = _fr.face_distance(known_enc, enc)
+            best_idx  = int(np.argmin(distances))
+            best_dist = float(distances[best_idx])
+            if best_dist < 0.55:
+                results.append({"name": known_names[best_idx], "dist": best_dist})
+            else:
+                results.append({"name": "Unknown", "dist": best_dist})
+        else:
+            results.append({"name": "Unknown", "dist": 0.9})
+
+    unknowns = [r for r in results if r["name"] == "Unknown"]
+    friendly = [r for r in results if r["name"] != "Unknown"]
+
+    ts = datetime.now(timezone.utc).isoformat()
+
+    if unknowns:
+        confidence = float(1.0 - min(u["dist"] for u in unknowns))
+        return {
+            "type": "intruder",
+            "confidence": round(confidence, 4),
+            "source": "video",
+            "timestamp": ts,
+            "detected_name": "Unknown",
+        }
+
+    if friendly:
+        best = min(friendly, key=lambda r: r["dist"])
+        return {
+            "type": "friendly",
+            "confidence": round(1.0 - best["dist"], 4),
+            "source": "video",
+            "timestamp": ts,
+            "detected_name": best["name"],
+        }
+
+    return {"type": "normal", "confidence": 1.0, "source": "video", "timestamp": ts, "detected_name": None}
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +419,41 @@ async def webcam_boxes(
             "x1": x1 / w, "y1": y1 / h,
             "x2": x2 / w, "y2": y2 / h,
         })
+
+    # Overlay face recognition boxes if available
+    if FACE_RECOGNITION_AVAILABLE:
+        img_rgb   = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        locations = _fr.face_locations(img_rgb, model="hog")
+        if locations:
+            face_encs = _fr.face_encodings(img_rgb, locations)
+            faces_col = get_faces_collection()
+            known_enc, known_names = [], []
+            async for doc in faces_col.find():
+                known_enc.append(np.array(doc["encoding"]))
+                known_names.append(doc["name"])
+
+            for enc, (top, right, bottom, left) in zip(face_encs, locations):
+                if known_enc:
+                    distances = _fr.face_distance(known_enc, enc)
+                    best_idx  = int(np.argmin(distances))
+                    best_dist = float(distances[best_idx])
+                    if best_dist < 0.55:
+                        label = known_names[best_idx]
+                        color = "#22c55e"
+                        conf  = round(1.0 - best_dist, 3)
+                    else:
+                        label = "Unknown"
+                        color = "#ef4444"
+                        conf  = round(1.0 - best_dist, 3)
+                else:
+                    label = "Unknown"
+                    color = "#ef4444"
+                    conf  = 0.9
+                boxes.append({
+                    "label": label, "confidence": conf, "color": color,
+                    "x1": left / w, "y1": top / h,
+                    "x2": right / w, "y2": bottom / h,
+                })
 
     return {"boxes": boxes}
 
@@ -430,6 +528,97 @@ async def upload_video(
 
     finally:
         os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Face recognition — enroll / list / delete / encodings
+# ---------------------------------------------------------------------------
+
+@app.post("/faces", response_model=FaceOut, status_code=201, tags=["faces"])
+async def enroll_face(face: FaceIn, _user: str = Depends(get_current_user)):
+    """Enroll a new friendly person by name + base64 photo."""
+    if not FACE_RECOGNITION_AVAILABLE:
+        raise HTTPException(500, "face_recognition library not installed on server")
+
+    import numpy as np
+
+    img_bytes = base64.b64decode(face.photo_b64)
+    img_array = np.frombuffer(img_bytes, dtype=np.uint8)
+
+    import cv2 as _cv2
+    img_bgr = _cv2.imdecode(img_array, _cv2.IMREAD_COLOR)
+    img_rgb  = _cv2.cvtColor(img_bgr, _cv2.COLOR_BGR2RGB)
+
+    encodings = _fr.face_encodings(img_rgb, _fr.face_locations(img_rgb))
+    if not encodings:
+        raise HTTPException(400, "No face detected in the uploaded photo. Please use a clear, front-facing photo.")
+
+    col = get_faces_collection()
+    doc = {
+        "name":     face.name.strip(),
+        "encoding": encodings[0].tolist(),
+        "created":  datetime.now(timezone.utc).isoformat(),
+    }
+    result = await col.insert_one(doc)
+    inserted_id = str(result.inserted_id)
+
+    # Save photo thumbnail
+    fname = f"face_{inserted_id}.jpg"
+    (FACES_DIR / fname).write_bytes(img_bytes)
+    await col.update_one({"_id": result.inserted_id}, {"$set": {"photo_file": fname}})
+
+    return FaceOut(id=inserted_id, name=doc["name"], photo_url=f"/faces/media/{fname}")
+
+
+@app.get("/faces", response_model=list[FaceOut], tags=["faces"])
+async def list_faces(_user: str = Depends(get_current_user)):
+    """Return all enrolled friendly faces."""
+    col = get_faces_collection()
+    faces = []
+    async for doc in col.find():
+        fid = str(doc["_id"])
+        photo_url = f"/faces/media/{doc['photo_file']}" if doc.get("photo_file") else None
+        faces.append(FaceOut(id=fid, name=doc["name"], photo_url=photo_url))
+    return faces
+
+
+@app.delete("/faces/{face_id}", tags=["faces"])
+async def delete_face(face_id: str, _user: str = Depends(get_current_user)):
+    """Remove an enrolled face."""
+    col = get_faces_collection()
+    doc = await col.find_one({"_id": ObjectId(face_id)})
+    if not doc:
+        raise HTTPException(404, "Face not found")
+    if doc.get("photo_file"):
+        try:
+            (FACES_DIR / doc["photo_file"]).unlink(missing_ok=True)
+        except Exception:
+            pass
+    await col.delete_one({"_id": ObjectId(face_id)})
+    return {"deleted": face_id}
+
+
+@app.get("/faces/encodings", response_model=list[FaceEncoding], tags=["faces"])
+async def get_face_encodings(_user: str = Depends(get_current_user)):
+    """Return all name+encoding pairs — consumed by the ML detection loop."""
+    col = get_faces_collection()
+    result = []
+    async for doc in col.find():
+        result.append(FaceEncoding(
+            id=str(doc["_id"]),
+            name=doc["name"],
+            encoding=doc["encoding"],
+        ))
+    return result
+
+
+@app.get("/faces/media/{filename}", tags=["faces"])
+async def serve_face_media(filename: str, token: str = Query(default="")):
+    verify_token(token)
+    path = FACES_DIR / filename
+    if not path.exists():
+        raise HTTPException(404, "Face photo not found")
+    return FileResponse(str(path), media_type="image/jpeg")
 
 
 # ---------------------------------------------------------------------------

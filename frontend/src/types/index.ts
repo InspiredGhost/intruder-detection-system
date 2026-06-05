@@ -8,6 +8,13 @@ export interface Alert {
   audio_event?: string
   frame_file?: string
   audio_file?: string
+  detected_name?: string | null
+}
+
+export interface Face {
+  id: string
+  name: string
+  photo_url?: string | null
 }
 
 export interface Stats {

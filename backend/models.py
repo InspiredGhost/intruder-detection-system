@@ -12,10 +12,28 @@ class AlertIn(BaseModel):
     frame_file: Optional[str] = None
     audio_file: Optional[str] = None
     audio_b64: Optional[str] = None   # raw base64 WAV, stripped before DB insert
+    detected_name: Optional[str] = None  # face recognition result
 
 
 class AlertOut(AlertIn):
     id: str
+
+
+class FaceIn(BaseModel):
+    name: str
+    photo_b64: str  # base64-encoded JPEG
+
+
+class FaceOut(BaseModel):
+    id: str
+    name: str
+    photo_url: Optional[str] = None
+
+
+class FaceEncoding(BaseModel):
+    id: str
+    name: str
+    encoding: list[float]  # 128-d face embedding
 
 
 class DeviceConfig(BaseModel):

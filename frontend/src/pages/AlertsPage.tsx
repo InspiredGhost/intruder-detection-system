@@ -176,6 +176,7 @@ export default function AlertsPage() {
           <thead>
             <tr className="border-b border-gray-100 bg-slate-50 text-gray-400 text-xs uppercase tracking-wider">
               <th className="text-left px-5 py-3.5 font-semibold">Type</th>
+              <th className="text-left px-5 py-3.5 font-semibold">Person</th>
               <th className="text-left px-5 py-3.5 font-semibold">Source</th>
               <th className="text-left px-5 py-3.5 font-semibold">Confidence</th>
               <th className="text-left px-5 py-3.5 font-semibold">Timestamp</th>
@@ -184,12 +185,12 @@ export default function AlertsPage() {
           <tbody>
             {loading && (
               <tr>
-                <td colSpan={4} className="text-center text-gray-400 py-12">Loading…</td>
+                <td colSpan={5} className="text-center text-gray-400 py-12">Loading…</td>
               </tr>
             )}
             {!loading && filtered.length === 0 && (
               <tr>
-                <td colSpan={4} className="text-center text-gray-400 py-12">No alerts match the current filters.</td>
+                <td colSpan={5} className="text-center text-gray-400 py-12">No alerts match the current filters.</td>
               </tr>
             )}
             {filtered.map((a, i) => (
@@ -204,6 +205,19 @@ export default function AlertsPage() {
                   <span className={`inline-block px-2.5 py-0.5 rounded-md border text-xs font-semibold capitalize ${typeBadge(a.type)}`}>
                     {a.type}
                   </span>
+                </td>
+                <td className="px-5 py-3">
+                  {a.detected_name ? (
+                    <span className={`inline-block px-2.5 py-0.5 rounded-md border text-xs font-semibold ${
+                      a.detected_name === 'Unknown'
+                        ? 'bg-tut-red/10 text-tut-red border-tut-red/20'
+                        : 'bg-green-50 text-green-700 border-green-200'
+                    }`}>
+                      {a.detected_name}
+                    </span>
+                  ) : (
+                    <span className="text-gray-300 text-xs">—</span>
+                  )}
                 </td>
                 <td className="px-5 py-3">
                   <span className={`inline-block px-2.5 py-0.5 rounded-md border text-xs font-medium ${SOURCE_BADGE[a.source] ?? 'bg-gray-50 text-gray-500 border-gray-200'}`}>
@@ -255,13 +269,22 @@ export default function AlertsPage() {
             <p className="text-gray-400 text-xs mb-4">{formatDateTime(selectedAlert.timestamp)}</p>
 
             {/* Badges */}
-            <div className="flex items-center gap-2 mb-4">
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
               <span className={`inline-block px-2.5 py-0.5 rounded-md border text-xs font-semibold capitalize ${typeBadge(selectedAlert.type)}`}>
                 {selectedAlert.type}
               </span>
               <span className={`inline-block px-2.5 py-0.5 rounded-md border text-xs font-medium ${SOURCE_BADGE[selectedAlert.source] ?? 'bg-gray-50 text-gray-500 border-gray-200'}`}>
                 {SOURCE_LABEL[selectedAlert.source] ?? selectedAlert.source}
               </span>
+              {selectedAlert.detected_name && (
+                <span className={`inline-block px-2.5 py-0.5 rounded-md border text-xs font-semibold ${
+                  selectedAlert.detected_name === 'Unknown'
+                    ? 'bg-tut-red/10 text-tut-red border-tut-red/20'
+                    : 'bg-green-50 text-green-700 border-green-200'
+                }`}>
+                  {selectedAlert.detected_name === 'Unknown' ? 'Unknown Intruder' : selectedAlert.detected_name}
+                </span>
+              )}
             </div>
 
             {/* Confidence bar */}
@@ -280,13 +303,21 @@ export default function AlertsPage() {
               </div>
             </div>
 
-            {/* Frame image */}
+            {/* Frame image (cropped intruder face or scene) */}
             {selectedAlert.frame_file && (
-              <img
-                src={`/alerts/media/${selectedAlert.frame_file}?token=${token}`}
-                className="w-full rounded-xl mt-2 max-h-72 object-cover border border-gray-100"
-                alt="Alert frame"
-              />
+              <div className="mt-2">
+                {selectedAlert.detected_name === 'Unknown' && (
+                  <p className="text-xs font-semibold text-tut-red uppercase tracking-wide mb-1.5 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-tut-red inline-block" />
+                    Intruder — captured photo
+                  </p>
+                )}
+                <img
+                  src={`/alerts/media/${selectedAlert.frame_file}?token=${token}`}
+                  className="w-full rounded-xl max-h-72 object-contain border border-gray-100 bg-gray-50"
+                  alt={selectedAlert.detected_name === 'Unknown' ? 'Intruder face' : 'Alert frame'}
+                />
+              </div>
             )}
 
             {/* Audio player */}

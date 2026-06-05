@@ -7,6 +7,7 @@ import Layout from './components/Layout'
 import AlertsPage from './pages/AlertsPage'
 import Dashboard from './pages/Dashboard'
 import DetectionPage from './pages/DetectionPage'
+import EnrollPage from './pages/EnrollPage'
 import Login from './pages/Login'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
@@ -29,6 +30,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
           <Route path="/dashboard" element={<Dashboard />} />
           <Route path="/detection" element={<DetectionPage />} />
           <Route path="/alerts" element={<AlertsPage />} />
+          <Route path="/enroll" element={<EnrollPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

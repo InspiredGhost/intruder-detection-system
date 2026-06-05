@@ -9,10 +9,10 @@ function authHeaders() {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
-const NORMAL = new Set(['normal', 'normalvideos'])
+const SAFE = new Set(['normal', 'normalvideos', 'friendly'])
 
 function detectionBadge(type: string) {
-  return NORMAL.has(type.toLowerCase())
+  return SAFE.has(type.toLowerCase())
     ? 'text-green-700 border-green-200 bg-green-50'
     : 'text-tut-red border-tut-red/20 bg-tut-red/10'
 }
@@ -36,16 +36,16 @@ export default function LiveCameraDetect() {
           { headers: authHeaders() },
         )
         setDetection(data)
-        if (!NORMAL.has(data.type.toLowerCase()) && data.confidence > 0.5) {
-          // Capture the current frame so it is saved with the alert
+        if (!SAFE.has(data.type.toLowerCase()) && data.confidence > 0.5) {
           const raw = cameraRef.current?.captureFrame()
           const frameUrl = raw ? `data:image/jpeg;base64,${raw}` : undefined
           await axios.post('/predict', {
-            type:       data.type,
-            confidence: data.confidence,
-            source:     'video',
-            timestamp:  data.timestamp,
-            frame_url:  frameUrl,
+            type:          data.type,
+            confidence:    data.confidence,
+            source:        'video',
+            timestamp:     data.timestamp,
+            frame_url:     frameUrl,
+            detected_name: (data as DetectionResult & { detected_name?: string }).detected_name ?? null,
           }, { headers: authHeaders() })
         }
       } catch { /* ignore single-frame errors */ }
@@ -64,7 +64,11 @@ export default function LiveCameraDetect() {
           active={isRunning}
           overlayLabel={
             detection
-              ? `${detection.type.toUpperCase()} — ${(detection.confidence * 100).toFixed(0)}%`
+              ? (() => {
+                  const name = (detection as DetectionResult & { detected_name?: string }).detected_name
+                  const label = name ? name : detection.type.toUpperCase()
+                  return `${label} — ${(detection.confidence * 100).toFixed(0)}%`
+                })()
               : undefined
           }
           overlayColor={detection ? detectionBadge(detection.type) : undefined}
