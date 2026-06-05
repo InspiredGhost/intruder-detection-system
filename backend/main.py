@@ -42,6 +42,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from auth import authenticate_user, create_access_token, get_current_user, verify_token
 from database import get_alerts_collection, get_faces_collection
 from models import AlertIn, AlertOut, CameraIn, DeviceConfig, FaceEncoding, FaceIn, FaceOut, FrameIn, TokenResponse
+from sms import send_sms
 
 MEDIA_DIR = Path(__file__).parent / "alerts"
 MEDIA_DIR.mkdir(exist_ok=True)
@@ -207,6 +208,20 @@ async def store_alert(
             dead.append(ws)
     for ws in dead:
         _alert_ws_clients.remove(ws)
+
+    # Send SMS for intruder alerts
+    if doc.get("type") == "intruder":
+        owner_phone = os.environ.get("OWNER_PHONE", "")
+        if owner_phone:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            msg = (
+                f"SENTINELAI ALERT: Unknown intruder detected at {ts}. "
+                f"Confidence: {round(doc.get('confidence', 0) * 100)}%. "
+                f"Check your dashboard immediately."
+            )
+            import asyncio as _asyncio
+            loop = _asyncio.get_event_loop()
+            loop.run_in_executor(None, send_sms, owner_phone, msg)
 
     return {"id": inserted_id}
 
