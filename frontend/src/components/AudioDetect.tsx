@@ -80,10 +80,11 @@ export default function AudioDetect({ isRunning }: Props) {
         const blob = new Blob(chunks, { type: recorder.mimeType })
         const { b64, rms } = await blobToWavBase64(blob)
 
-        // Skip inference if audio is too quiet — ambient noise gate
+        // Skip inference if audio is too quiet — reset to normal and continue
         if (rms < MIN_RMS) {
+          setResult(prev => prev?.intrusion ? { intrusion: false, confidence: 0, timestamp: new Date().toISOString() } : prev)
           if (streamRef.current) scheduleChunk(streamRef.current)
-          return  // early return — skip the post-alert pause scheduling below
+          return
         }
 
         const { data } = await axios.post<AudioResult>(
