@@ -22,9 +22,10 @@ ml/data_cache/
 ml/runs/
 
 # Backend generated
-backend/alerts/*.jpg
-backend/alerts/*.wav
+backend/alerts/
+backend/faces/
 backend/media/
+backend/static/
 
 # OS
 .DS_Store

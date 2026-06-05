@@ -226,7 +226,9 @@ export default function Dashboard() {
                 LIVE
               </span>
             </div>
-            <CameraView autoStart />
+            <div className="max-h-64 overflow-hidden rounded-xl">
+              <CameraView autoStart />
+            </div>
           </div>
 
           <SourceChart stats={stats} />

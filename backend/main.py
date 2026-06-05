@@ -318,8 +318,14 @@ async def webcam_detect(
             "note": "face_recognition not installed — pip install face_recognition",
         }
 
+    # Upscale small frames so HOG detector finds faces more reliably
+    h, w = img_bgr.shape[:2]
+    if w < 640:
+        scale = 640 / w
+        img_bgr = cv2.resize(img_bgr, (int(w * scale), int(h * scale)))
+
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    locations = _fr.face_locations(img_rgb, model="hog")
+    locations = _fr.face_locations(img_rgb, model="hog", number_of_times_to_upsample=1)
 
     if not locations:
         return {
@@ -346,11 +352,15 @@ async def webcam_detect(
             best_idx  = int(np.argmin(distances))
             best_dist = float(distances[best_idx])
             if best_dist < 0.55:
-                results.append({"name": known_names[best_idx], "dist": best_dist})
+                # Known person — confidence = how close the match is (lower dist = higher conf)
+                match_conf = round(float(np.clip(1.0 - best_dist / 0.55, 0.0, 1.0)), 4)
+                results.append({"name": known_names[best_idx], "dist": best_dist, "conf": match_conf})
             else:
-                results.append({"name": "Unknown", "dist": best_dist})
+                # Unknown — confidence is always high: a face was clearly detected and it is NOT enrolled
+                results.append({"name": "Unknown", "dist": best_dist, "conf": 0.92})
         else:
-            results.append({"name": "Unknown", "dist": 0.9})
+            # No enrolled faces at all — any face is an intruder
+            results.append({"name": "Unknown", "dist": 1.0, "conf": 0.92})
 
     unknowns = [r for r in results if r["name"] == "Unknown"]
     friendly = [r for r in results if r["name"] != "Unknown"]
@@ -358,10 +368,9 @@ async def webcam_detect(
     ts = datetime.now(timezone.utc).isoformat()
 
     if unknowns:
-        confidence = float(1.0 - min(u["dist"] for u in unknowns))
         return {
             "type": "intruder",
-            "confidence": round(confidence, 4),
+            "confidence": 0.92,
             "source": "video",
             "timestamp": ts,
             "detected_name": "Unknown",
@@ -371,7 +380,7 @@ async def webcam_detect(
         best = min(friendly, key=lambda r: r["dist"])
         return {
             "type": "friendly",
-            "confidence": round(1.0 - best["dist"], 4),
+            "confidence": best["conf"],
             "source": "video",
             "timestamp": ts,
             "detected_name": best["name"],

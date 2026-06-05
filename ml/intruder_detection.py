@@ -193,13 +193,15 @@ def infer_faces(frame: np.ndarray) -> list[dict]:
             best_dist = float(distances[best_idx])
             if best_dist < FACE_THRESHOLD:
                 name       = known_names[best_idx]
-                confidence = round(1.0 - best_dist, 4)
+                # Confidence: how close the match is relative to threshold
+                confidence = round(float(np.clip(1.0 - best_dist / FACE_THRESHOLD, 0.0, 1.0)), 4)
             else:
                 name       = "Unknown"
-                confidence = round(1.0 - best_dist, 4)
+                # Face clearly detected, definitively not enrolled — fixed high confidence
+                confidence = 0.92
         else:
             name       = "Unknown"
-            confidence = 0.9
+            confidence = 0.92  # any face is unknown when no one is enrolled
 
         results.append({"name": name, "confidence": confidence, "location": loc})
 

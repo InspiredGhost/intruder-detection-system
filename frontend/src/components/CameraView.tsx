@@ -164,7 +164,7 @@ const CameraView = forwardRef<CameraViewHandle, Props>(
     }, [live])
 
     return (
-      <div className="w-full max-w-[260px] aspect-square bg-gray-950 rounded-xl overflow-hidden border border-gray-800 relative flex items-center justify-center">
+      <div className="w-full aspect-video bg-gray-950 rounded-xl overflow-hidden border border-gray-800 relative flex items-center justify-center">
         {!live && (
           <div className="flex flex-col items-center gap-2 text-gray-600 p-4 text-center">
             {loading ? (

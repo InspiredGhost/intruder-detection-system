@@ -1,11 +1,12 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { Activity, Bell, Camera, LayoutDashboard, LogOut, Mic, Video } from 'lucide-react';
+import { Activity, Bell, Camera, LayoutDashboard, LogOut, Mic, UserCheck, Video } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 const NAV = [
     { icon: LayoutDashboard, label: 'Dashboard', path: '/dashboard' },
     { icon: Video, label: 'Detection', path: '/detection' },
     { icon: Bell, label: 'Alerts', path: '/alerts' },
+    { icon: UserCheck, label: 'Enrol Faces', path: '/enroll' },
 ];
 export default function Sidebar() {
     const location = useLocation();

@@ -57,14 +57,20 @@ export default function EnrollPage() {
     setCamActive(false)
   }
 
+  // Attach stream to video element once it mounts (camActive makes it appear)
+  useEffect(() => {
+    if (camActive && videoRef.current && streamRef.current) {
+      videoRef.current.srcObject = streamRef.current
+    }
+  }, [camActive])
+
   async function startCam() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true })
       streamRef.current = stream
-      if (videoRef.current) videoRef.current.srcObject = stream
-      setCamActive(true)
       setPhotoB64(null)
       setPreview(null)
+      setCamActive(true)  // triggers useEffect above to wire up srcObject
     } catch {
       setError('Could not access webcam. Please allow camera permission or use file upload.')
     }
