@@ -59,7 +59,7 @@ export default function AudioDetect({ isRunning }: Props) {
 
   function scheduleChunk(stream: MediaStream) {
     if (!streamRef.current) return
-    const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
+    const recorder = new MediaRecorder(stream)
     const chunks: Blob[] = []
     mediaRecorderRef.current = recorder
 
@@ -67,11 +67,10 @@ export default function AudioDetect({ isRunning }: Props) {
 
     recorder.onstop = async () => {
       if (!streamRef.current) return
-      const blob = new Blob(chunks, { type: 'audio/webm' })
-      const arrayBuffer = await blob.arrayBuffer()
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))
-
       try {
+        const blob = new Blob(chunks, { type: recorder.mimeType })
+        const b64 = await blobToWavBase64(blob)
+
         const { data } = await axios.post<AudioResult>(
           '/audio/detect',
           { audio_b64: b64 },
@@ -98,6 +97,61 @@ export default function AudioDetect({ isRunning }: Props) {
 
     recorder.start()
     setTimeout(() => { if (recorder.state === 'recording') recorder.stop() }, CHUNK_MS)
+  }
+
+  /**
+   * Decode any browser audio blob (webm/ogg/mp4) via AudioContext,
+   * resample to 16 kHz mono, and encode as 16-bit PCM WAV base64.
+   * This is what the Python audio model expects.
+   */
+  async function blobToWavBase64(blob: Blob): Promise<string> {
+    const arrayBuffer = await blob.arrayBuffer()
+
+    // Decode compressed audio (WebM/Opus etc.)
+    const decodeCtx = new AudioContext()
+    const decoded   = await decodeCtx.decodeAudioData(arrayBuffer)
+    await decodeCtx.close()
+
+    // Resample to 16 kHz mono
+    const TARGET_SR = 16000
+    const numSamples = Math.ceil(decoded.duration * TARGET_SR)
+    const offlineCtx = new OfflineAudioContext(1, numSamples, TARGET_SR)
+    const src = offlineCtx.createBufferSource()
+    src.buffer = decoded
+    src.connect(offlineCtx.destination)
+    src.start(0)
+    const resampled = await offlineCtx.startRendering()
+
+    // Encode as 16-bit PCM WAV
+    const pcm = resampled.getChannelData(0)
+    const wavBuffer = new ArrayBuffer(44 + pcm.length * 2)
+    const view = new DataView(wavBuffer)
+    const write = (offset: number, str: string) =>
+      [...str].forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)))
+
+    write(0, 'RIFF')
+    view.setUint32(4, 36 + pcm.length * 2, true)
+    write(8, 'WAVE')
+    write(12, 'fmt ')
+    view.setUint32(16, 16, true)
+    view.setUint16(20, 1, true)          // PCM
+    view.setUint16(22, 1, true)          // mono
+    view.setUint32(24, TARGET_SR, true)
+    view.setUint32(28, TARGET_SR * 2, true)
+    view.setUint16(32, 2, true)
+    view.setUint16(34, 16, true)
+    write(36, 'data')
+    view.setUint32(40, pcm.length * 2, true)
+    let offset = 44
+    for (let i = 0; i < pcm.length; i++) {
+      view.setInt16(offset, Math.max(-1, Math.min(1, pcm[i])) * 0x7FFF, true)
+      offset += 2
+    }
+
+    const bytes = new Uint8Array(wavBuffer)
+    let binary = ''
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+    return btoa(binary)
   }
 
   const isAlert = result?.intrusion === true
