@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { AlertTriangle, CameraOff, Loader2, ShieldAlert, Square, X } from 'lucide-react'
+import { AlertTriangle, Loader2, ShieldAlert, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { DetectionResult } from '../types'
 import CameraView, { type CameraViewHandle } from './CameraView'
@@ -26,17 +26,24 @@ interface IntruderPopup {
   timestamp: string
 }
 
-export default function LiveCameraDetect() {
+interface Props {
+  isRunning: boolean
+}
+
+export default function LiveCameraDetect({ isRunning }: Props) {
   const cameraRef       = useRef<CameraViewHandle>(null)
   const intervalRef     = useRef<ReturnType<typeof setInterval> | null>(null)
   const lastAlertRef    = useRef<number>(0)
-  const [detection, setDetection]       = useState<RichDetection | null>(null)
+  const [detection, setDetection]         = useState<RichDetection | null>(null)
   const [intruderAlert, setIntruderAlert] = useState(false)
-  const [popup, setPopup]               = useState<IntruderPopup | null>(null)
-  const [isRunning, setIsRunning]       = useState(true)
+  const [popup, setPopup]                 = useState<IntruderPopup | null>(null)
 
   useEffect(() => {
-    if (!isRunning) return
+    if (!isRunning) {
+      setDetection(null)
+      setIntruderAlert(false)
+      return
+    }
 
     intervalRef.current = setInterval(async () => {
       const base64 = cameraRef.current?.captureFrame()
@@ -192,37 +199,15 @@ export default function LiveCameraDetect() {
         overlayColor={detection ? detectionBadge(detection.type) : undefined}
       />
 
-      {/* Controls + detection result — horizontal row below camera */}
+      {/* Detection status bar */}
       <div className="flex items-start gap-4 flex-wrap">
+        {isRunning && (
+          <div className="flex items-center gap-2 text-xs text-tut-blue font-medium bg-tut-blue/10 border border-tut-blue/20 px-3 py-2 rounded-lg">
+            <Loader2 size={13} className="animate-spin" />
+            Face scan — every 2 s
+          </div>
+        )}
 
-        {/* Status / start-stop */}
-        <div className="flex items-center gap-3">
-          {isRunning ? (
-            <>
-              <div className="flex items-center gap-2 text-xs text-tut-blue font-medium bg-tut-blue/10 border border-tut-blue/20 px-3 py-2 rounded-lg">
-                <Loader2 size={13} className="animate-spin" />
-                Detecting — every 2 s
-              </div>
-              <button
-                onClick={() => { setIsRunning(false); setDetection(null); setIntruderAlert(false) }}
-                className="flex items-center gap-2 bg-tut-red/10 hover:bg-tut-red/20 border border-tut-red/20 text-tut-red font-semibold text-sm px-4 py-2 rounded-lg transition-colors"
-              >
-                <Square size={13} />
-                Stop
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={() => setIsRunning(true)}
-              className="flex items-center gap-2 bg-tut-blue hover:bg-[#004a80] text-white font-semibold text-sm px-5 py-2.5 rounded-lg transition-colors shadow-sm"
-            >
-              <CameraOff size={16} />
-              Restart Detection
-            </button>
-          )}
-        </div>
-
-        {/* Last detection pill — inline beside controls */}
         {detection && (
           <div className={`flex items-center gap-3 border rounded-xl px-4 py-2 flex-1 min-w-0 ${intruderAlert ? 'bg-tut-red/5 border-tut-red/20' : 'bg-slate-50 border-gray-200'}`}>
             <div className="shrink-0">

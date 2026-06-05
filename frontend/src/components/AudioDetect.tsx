@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { Mic, MicOff, Volume2 } from 'lucide-react'
+import { Volume2 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
 function authHeaders() {
@@ -14,35 +14,43 @@ interface AudioResult {
   note?: string
 }
 
-const CHUNK_MS       = 2000   // 2-second recording windows
-const ALERT_COOLDOWN = 10000  // min ms between alerts
+const CHUNK_MS       = 2000
+const ALERT_COOLDOWN = 10000
 
-export default function AudioDetect() {
-  const [running, setRunning]         = useState(false)
-  const [result, setResult]           = useState<AudioResult | null>(null)
-  const [error, setError]             = useState('')
-  const lastAlertRef                  = useRef<number>(0)
-  const mediaRecorderRef              = useRef<MediaRecorder | null>(null)
-  const streamRef                     = useRef<MediaStream | null>(null)
-  const intervalRef                   = useRef<ReturnType<typeof setInterval> | null>(null)
+interface Props {
+  isRunning: boolean
+}
 
-  useEffect(() => () => stopAudio(), [])
+export default function AudioDetect({ isRunning }: Props) {
+  const [result, setResult]   = useState<AudioResult | null>(null)
+  const [error, setError]     = useState('')
+  const lastAlertRef          = useRef<number>(0)
+  const mediaRecorderRef      = useRef<MediaRecorder | null>(null)
+  const streamRef             = useRef<MediaStream | null>(null)
+
+  // Start/stop mic stream when parent toggles isRunning
+  useEffect(() => {
+    if (isRunning) {
+      setError('')
+      setResult(null)
+      startAudio()
+    } else {
+      stopAudio()
+    }
+    return () => stopAudio()
+  }, [isRunning])
 
   function stopAudio() {
-    if (intervalRef.current) clearInterval(intervalRef.current)
     mediaRecorderRef.current?.stop()
     streamRef.current?.getTracks().forEach(t => t.stop())
     streamRef.current = null
     mediaRecorderRef.current = null
-    setRunning(false)
   }
 
   async function startAudio() {
-    setError('')
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       streamRef.current = stream
-      setRunning(true)
       scheduleChunk(stream)
     } catch {
       setError('Microphone access denied.')
@@ -50,15 +58,15 @@ export default function AudioDetect() {
   }
 
   function scheduleChunk(stream: MediaStream) {
-    // Record one chunk, send it, then schedule the next
+    if (!streamRef.current) return
     const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm' })
-    const chunks: BlobEvent['data'][] = []
+    const chunks: Blob[] = []
     mediaRecorderRef.current = recorder
 
     recorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data) }
 
     recorder.onstop = async () => {
-      if (!streamRef.current) return  // stopped by user
+      if (!streamRef.current) return
       const blob = new Blob(chunks, { type: 'audio/webm' })
       const arrayBuffer = await blob.arrayBuffer()
       const b64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))
@@ -83,9 +91,8 @@ export default function AudioDetect() {
             }, { headers: authHeaders() })
           }
         }
-      } catch { /* ignore — keep recording */ }
+      } catch { /* keep going */ }
 
-      // Schedule next chunk
       if (streamRef.current) scheduleChunk(streamRef.current)
     }
 
@@ -96,76 +103,88 @@ export default function AudioDetect() {
   const isAlert = result?.intrusion === true
 
   return (
-    <div className={`border rounded-xl p-4 space-y-3 ${isAlert ? 'border-tut-red/30 bg-tut-red/5' : 'border-gray-200 bg-white'}`}>
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Volume2 size={16} className={isAlert ? 'text-tut-red' : 'text-tut-teal'} />
-          <h3 className="text-sm font-semibold text-tut-teal">Audio Detection</h3>
-        </div>
+    <div className={`h-full border rounded-xl p-4 space-y-4 flex flex-col ${isAlert ? 'border-tut-red/30 bg-tut-red/5' : 'border-gray-200 bg-white'}`}>
 
-        {running ? (
-          <div className="flex items-center gap-2">
-            <span className="flex items-center gap-1.5 text-xs text-tut-blue font-medium bg-tut-blue/10 border border-tut-blue/20 px-2.5 py-1.5 rounded-lg">
-              <span className="w-1.5 h-1.5 rounded-full bg-tut-blue animate-pulse" />
-              Listening
-            </span>
-            <button
-              onClick={stopAudio}
-              className="flex items-center gap-1.5 text-xs text-tut-red font-semibold bg-tut-red/10 border border-tut-red/20 hover:bg-tut-red/20 px-2.5 py-1.5 rounded-lg transition-colors"
-            >
-              <MicOff size={13} />
-              Stop
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={startAudio}
-            className="flex items-center gap-1.5 text-xs text-white font-semibold bg-tut-teal hover:bg-tut-blue px-3 py-1.5 rounded-lg transition-colors shadow-sm"
-          >
-            <Mic size={13} />
-            Start Listening
-          </button>
+      {/* Header */}
+      <div className="flex items-center gap-2">
+        <Volume2 size={16} className={isAlert ? 'text-tut-red' : 'text-tut-teal'} />
+        <h3 className="text-sm font-semibold text-tut-teal">Audio Detection</h3>
+        {isRunning && (
+          <span className="ml-auto flex items-center gap-1.5 text-xs text-tut-blue font-medium bg-tut-blue/10 border border-tut-blue/20 px-2.5 py-1 rounded-lg">
+            <span className="w-1.5 h-1.5 rounded-full bg-tut-blue animate-pulse" />
+            Listening
+          </span>
         )}
       </div>
 
+      {/* Error */}
       {error && (
         <p className="text-tut-red text-xs bg-tut-red/5 border border-tut-red/20 rounded-lg px-3 py-2">{error}</p>
       )}
 
+      {/* Idle state */}
+      {!isRunning && !result && (
+        <div className="flex-1 flex flex-col items-center justify-center text-center gap-2 py-8">
+          <Volume2 size={32} className="text-gray-200" />
+          <p className="text-gray-400 text-sm">Audio monitoring inactive</p>
+          <p className="text-gray-300 text-xs">Press Start Detection to begin</p>
+        </div>
+      )}
+
+      {/* Live waveform visualiser */}
+      {isRunning && (
+        <div className="flex-1 flex flex-col items-center justify-center gap-4">
+          {/* Animated bars */}
+          <div className="flex items-end gap-1 h-20">
+            {Array.from({ length: 20 }).map((_, i) => (
+              <div
+                key={i}
+                className={`w-2 rounded-full animate-pulse ${isAlert ? 'bg-tut-red' : 'bg-tut-blue/60'}`}
+                style={{
+                  height: `${20 + Math.sin(i * 0.8) * 15 + Math.random() * 20}px`,
+                  animationDelay: `${i * 0.05}s`,
+                  animationDuration: `${0.6 + Math.random() * 0.4}s`,
+                }}
+              />
+            ))}
+          </div>
+          <p className="text-gray-400 text-xs">Analysing 2-second audio windows…</p>
+        </div>
+      )}
+
+      {/* Result */}
       {result && (
-        <div className="flex items-center gap-4">
+        <div className="space-y-3">
           <div>
-            <p className="text-[10px] text-gray-400 uppercase tracking-wide font-semibold mb-0.5">Status</p>
-            <span className={`inline-block px-2 py-0.5 rounded-md border text-xs font-semibold ${
+            <p className="text-[10px] text-gray-400 uppercase tracking-wide font-semibold mb-1">Last Result</p>
+            <span className={`inline-block px-2.5 py-0.5 rounded-md border text-xs font-semibold ${
               isAlert
                 ? 'bg-tut-red/10 text-tut-red border-tut-red/20'
                 : 'bg-green-50 text-green-700 border-green-200'
             }`}>
-              {isAlert ? 'Intrusion Sound' : 'Normal'}
+              {isAlert ? '⚠ Intrusion Sound Detected' : 'Normal — No Threat'}
             </span>
           </div>
-          <div className="flex-1">
-            <p className="text-[10px] text-gray-400 uppercase tracking-wide font-semibold mb-1">Confidence</p>
-            <div className="flex items-center gap-2">
-              <div className="flex-1 bg-gray-100 rounded-full h-1.5">
-                <div
-                  className={`h-1.5 rounded-full ${isAlert ? 'bg-tut-red' : 'bg-tut-blue'}`}
-                  style={{ width: `${(result.confidence * 100).toFixed(0)}%` }}
-                />
-              </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <p className="text-[10px] text-gray-400 uppercase tracking-wide font-semibold">Confidence</p>
               <span className="text-xs font-bold tabular-nums text-tut-teal">
                 {(result.confidence * 100).toFixed(1)}%
               </span>
             </div>
+            <div className="w-full bg-gray-100 rounded-full h-2">
+              <div
+                className={`h-2 rounded-full transition-all ${isAlert ? 'bg-tut-red' : 'bg-tut-blue'}`}
+                style={{ width: `${(result.confidence * 100).toFixed(0)}%` }}
+              />
+            </div>
           </div>
+
           {result.note && (
             <p className="text-[10px] text-gray-400 italic">{result.note}</p>
           )}
         </div>
-      )}
-
-      {!running && !result && (
-        <p className="text-gray-400 text-xs">Click "Start Listening" to enable microphone-based intrusion detection.</p>
       )}
     </div>
   )
