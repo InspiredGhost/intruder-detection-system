@@ -327,7 +327,7 @@ def run(api_base: str, token: str, audio_device=None, camera: int = 0):
                     label = "ALERT ⚠" if prob > AUDIO_THRESHOLD else "ok"
                     print(f"[AUDIO] prob={prob:.3f}  threshold={AUDIO_THRESHOLD}  → {label}")
                     if prob > AUDIO_THRESHOLD:
-                        alerts.append(("gunshot", prob, "audio", None, None))
+                        alerts.append(("suspicious_audio", prob, "audio", None, None))
 
                 # --- Face recognition ---
                 if frame is not None:

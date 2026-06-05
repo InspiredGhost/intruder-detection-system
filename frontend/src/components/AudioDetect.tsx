@@ -90,7 +90,7 @@ export default function AudioDetect({ isRunning }: Props) {
             lastAlertRef.current = now
             setPopup({ confidence: data.confidence, timestamp: data.timestamp })
             await axios.post('/predict', {
-              type:       'gunshot',
+              type:       'suspicious_audio',
               confidence: data.confidence,
               source:     'audio',
               timestamp:  data.timestamp,
@@ -206,7 +206,7 @@ export default function AudioDetect({ isRunning }: Props) {
           <div className="px-5 py-4 space-y-3">
             <div className="flex items-center justify-between">
               <span className="text-gray-500 text-sm">Sound type</span>
-              <span className="text-tut-red font-semibold text-sm">Intrusion / Gunshot</span>
+              <span className="text-tut-red font-semibold text-sm">Suspicious Audio</span>
             </div>
             <div className="flex items-center justify-between">
               <span className="text-gray-500 text-sm">Confidence</span>
@@ -299,7 +299,7 @@ export default function AudioDetect({ isRunning }: Props) {
                 ? 'bg-tut-red/10 text-tut-red border-tut-red/20'
                 : 'bg-green-50 text-green-700 border-green-200'
             }`}>
-              {isAlert ? '⚠ Intrusion Sound Detected' : 'Normal — No Threat'}
+              {isAlert ? '⚠ Suspicious Audio Detected' : 'Normal — No Threat'}
             </span>
           </div>
 
