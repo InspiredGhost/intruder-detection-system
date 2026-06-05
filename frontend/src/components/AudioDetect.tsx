@@ -16,7 +16,8 @@ interface AudioResult {
 
 const CHUNK_MS          = 2000
 const ALERT_COOLDOWN    = 10000
-const POST_ALERT_PAUSE  = 5000  // wait 5s after detection before next recording
+const POST_ALERT_PAUSE  = 5000
+const MIN_RMS           = 0.04  // ignore audio quieter than this (filters ambient noise)
 
 interface Props {
   isRunning: boolean
@@ -77,7 +78,13 @@ export default function AudioDetect({ isRunning }: Props) {
       let detectedIntrusion = false
       try {
         const blob = new Blob(chunks, { type: recorder.mimeType })
-        const b64 = await blobToWavBase64(blob)
+        const { b64, rms } = await blobToWavBase64(blob)
+
+        // Skip inference if audio is too quiet — ambient noise gate
+        if (rms < MIN_RMS) {
+          if (streamRef.current) scheduleChunk(streamRef.current)
+          return  // early return — skip the post-alert pause scheduling below
+        }
 
         const { data } = await axios.post<AudioResult>(
           '/audio/detect',
@@ -119,7 +126,7 @@ export default function AudioDetect({ isRunning }: Props) {
    * resample to 16 kHz mono, and encode as 16-bit PCM WAV base64.
    * This is what the Python audio model expects.
    */
-  async function blobToWavBase64(blob: Blob): Promise<string> {
+  async function blobToWavBase64(blob: Blob): Promise<{ b64: string; rms: number }> {
     const arrayBuffer = await blob.arrayBuffer()
 
     // Decode compressed audio (WebM/Opus etc.)
@@ -163,10 +170,13 @@ export default function AudioDetect({ isRunning }: Props) {
       offset += 2
     }
 
+    // Compute RMS so caller can gate on volume
+    const rms = Math.sqrt(pcm.reduce((sum, s) => sum + s * s, 0) / pcm.length)
+
     const bytes = new Uint8Array(wavBuffer)
     let binary = ''
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
-    return btoa(binary)
+    return { b64: btoa(binary), rms }
   }
 
   const isAlert = result?.intrusion === true
