@@ -28,13 +28,17 @@ import cv2
 import httpx
 import numpy as np
 import sounddevice as sd
-import torch
-import torch.nn as nn
-from torchvision import models
-
 import face_recognition
 
-from utils.audio_utils import load_audio, pad_or_trim, waveform_to_melspec, TARGET_SR
+# Torch is optional — only needed for the audio model (not available on Pi slim install)
+try:
+    import torch
+    import torch.nn as nn
+    from torchvision import models
+    from utils.audio_utils import load_audio, pad_or_trim, waveform_to_melspec, TARGET_SR
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Config
@@ -42,11 +46,14 @@ from utils.audio_utils import load_audio, pad_or_trim, waveform_to_melspec, TARG
 AUDIO_MODEL_PATH = Path(__file__).parent / "models" / "audio_classifier.pt"
 
 AUDIO_THRESHOLD  = 0.50
-FACE_THRESHOLD   = 0.55   # Euclidean distance — lower = stricter match
+FACE_THRESHOLD   = 0.55
 AUDIO_CHUNK_S    = 1.0
-ALERT_COOLDOWN_S = 10.0   # minimum seconds between intruder alerts
+ALERT_COOLDOWN_S = 10.0
 
-DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
+if TORCH_AVAILABLE:
+    DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"
+else:
+    DEVICE = "cpu"
 
 # ---------------------------------------------------------------------------
 # Enrolled faces — refreshed from backend every 30 s
@@ -145,10 +152,13 @@ def _wav_bytes(samples: np.ndarray, sr: int = TARGET_SR) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Audio model
+# Audio model (skipped on Pi slim install where torch is not available)
 # ---------------------------------------------------------------------------
 
-def load_audio_model() -> nn.Module:
+def load_audio_model():
+    if not TORCH_AVAILABLE:
+        print("  [AUDIO] torch not available — audio detection disabled (Pi slim mode)")
+        return None
     model = models.efficientnet_b0(weights=None)
     in_features = model.classifier[1].in_features
     model.classifier = nn.Sequential(nn.Dropout(0.3), nn.Linear(in_features, 1))
@@ -157,12 +167,14 @@ def load_audio_model() -> nn.Module:
     return model
 
 
-@torch.no_grad()
-def infer_audio(model: nn.Module, chunk: np.ndarray) -> float:
-    chunk = pad_or_trim(chunk, TARGET_SR)
-    spec  = waveform_to_melspec(chunk).unsqueeze(0).to(DEVICE)
-    logit = model(spec).squeeze()
-    return float(torch.sigmoid(logit).cpu())
+def infer_audio(model, chunk: np.ndarray) -> float:
+    if model is None or not TORCH_AVAILABLE:
+        return 0.0
+    with torch.no_grad():
+        chunk = pad_or_trim(chunk, TARGET_SR)
+        spec  = waveform_to_melspec(chunk).unsqueeze(0).to(DEVICE)
+        logit = model(spec).squeeze()
+        return float(torch.sigmoid(logit).cpu())
 
 
 # ---------------------------------------------------------------------------
@@ -269,9 +281,9 @@ def push_frame(api_base: str, token: str, frame: np.ndarray):
 # ---------------------------------------------------------------------------
 
 def run(api_base: str, token: str, audio_device=None, camera: int = 0):
-    if not AUDIO_MODEL_PATH.exists():
-        print("ERROR: Audio model not found — run train_audio.py first.")
-        return
+    if TORCH_AVAILABLE and not AUDIO_MODEL_PATH.exists():
+        print("WARNING: Audio model not found — audio detection disabled.")
+        print("  Run train_audio.py to enable audio detection.")
 
     dev_info = sd.query_devices(audio_device, kind="input") if audio_device is not None \
                else sd.query_devices(kind="input")
