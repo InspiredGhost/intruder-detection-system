@@ -14,8 +14,9 @@ interface AudioResult {
   note?: string
 }
 
-const CHUNK_MS       = 2000
-const ALERT_COOLDOWN = 10000
+const CHUNK_MS          = 2000
+const ALERT_COOLDOWN    = 10000
+const POST_ALERT_PAUSE  = 5000  // wait 5s after detection before next recording
 
 interface Props {
   isRunning: boolean
@@ -73,6 +74,7 @@ export default function AudioDetect({ isRunning }: Props) {
 
     recorder.onstop = async () => {
       if (!streamRef.current) return
+      let detectedIntrusion = false
       try {
         const blob = new Blob(chunks, { type: recorder.mimeType })
         const b64 = await blobToWavBase64(blob)
@@ -85,6 +87,7 @@ export default function AudioDetect({ isRunning }: Props) {
         setResult(data)
 
         if (data.intrusion) {
+          detectedIntrusion = true
           const now = Date.now()
           if (now - lastAlertRef.current >= ALERT_COOLDOWN) {
             lastAlertRef.current = now
@@ -99,6 +102,11 @@ export default function AudioDetect({ isRunning }: Props) {
         }
       } catch { /* keep going */ }
 
+      if (!streamRef.current) return
+      // After a detection pause to let the room settle before next recording
+      if (detectedIntrusion) {
+        await new Promise(r => setTimeout(r, POST_ALERT_PAUSE))
+      }
       if (streamRef.current) scheduleChunk(streamRef.current)
     }
 
