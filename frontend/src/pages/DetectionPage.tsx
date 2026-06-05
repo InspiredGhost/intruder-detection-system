@@ -1,5 +1,6 @@
 import { Camera, Cpu, MonitorPlay, Upload } from 'lucide-react'
 import { useState } from 'react'
+import AudioDetect from '../components/AudioDetect'
 import CctvManager from '../components/CctvManager'
 import DeviceSelector from '../components/DeviceSelector'
 import LiveCameraDetect from '../components/LiveCameraDetect'
@@ -47,15 +48,15 @@ export default function DetectionPage() {
       {/* Tab content */}
       <div className="bg-white border border-gray-200 rounded-xl p-6 shadow-sm">
         {tab === 'live' && (
-          <div className="space-y-3">
+          <div className="space-y-4">
             <div>
               <h2 className="text-tut-teal font-semibold text-sm">Live Camera Detection</h2>
               <p className="text-gray-400 text-xs mt-0.5">
-                Uses your device's webcam. Frames are analyzed every 2 seconds using YOLOv8.
-                Threats are automatically saved as alerts.
+                Face recognition runs every 2 seconds. Unknown faces trigger an intruder alert.
               </p>
             </div>
             <LiveCameraDetect />
+            <AudioDetect />
           </div>
         )}
 

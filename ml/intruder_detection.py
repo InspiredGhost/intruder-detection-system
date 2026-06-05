@@ -42,9 +42,9 @@ TORCH_AVAILABLE = True
 # ---------------------------------------------------------------------------
 AUDIO_MODEL_PATH = Path(__file__).parent / "models" / "audio_classifier.pt"
 
-AUDIO_THRESHOLD  = 0.50
+AUDIO_THRESHOLD  = 0.30   # lowered — glass break is brief and scores lower than gunshots
 FACE_THRESHOLD   = 0.55
-AUDIO_CHUNK_S    = 1.0
+AUDIO_CHUNK_S    = 2.0   # 2s window catches the full glass break transient
 ALERT_COOLDOWN_S = 10.0
 
 DEVICE = "mps" if torch.backends.mps.is_available() else "cpu"

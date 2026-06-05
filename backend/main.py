@@ -69,6 +69,28 @@ except ImportError:
     YOLO_AVAILABLE = False
 
 try:
+    import torch
+    import torch.nn as nn
+    from torchvision import models as _tv_models
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+
+_audio_model = None
+AUDIO_MODEL_PATH = Path(__file__).parent.parent / "ml" / "models" / "audio_classifier.pt"
+AUDIO_THRESHOLD  = 0.30
+
+def _get_audio_model():
+    global _audio_model
+    if _audio_model is None and TORCH_AVAILABLE and AUDIO_MODEL_PATH.exists():
+        m = _tv_models.efficientnet_b0(weights=None)
+        m.classifier = nn.Sequential(nn.Dropout(0.3), nn.Linear(m.classifier[1].in_features, 1))
+        m.load_state_dict(torch.load(str(AUDIO_MODEL_PATH), map_location="cpu"))
+        m.eval()
+        _audio_model = m
+    return _audio_model
+
+try:
     import face_recognition as _fr
     FACE_RECOGNITION_AVAILABLE = True
 except ImportError:
@@ -215,7 +237,7 @@ async def store_alert(
         if owner_phone:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             msg = (
-                f"SENTINELAI ALERT: Unknown intruder detected at {ts}. "
+                f"Unknown intruder detected at {ts}. "
                 f"Confidence: {round(doc.get('confidence', 0) * 100)}%. "
                 f"Check your dashboard immediately."
             )
@@ -480,6 +502,53 @@ async def webcam_boxes(
                 })
 
     return {"boxes": boxes}
+
+
+# ---------------------------------------------------------------------------
+# Browser microphone audio detection
+# ---------------------------------------------------------------------------
+
+class AudioIn(BaseModel):
+    audio_b64: str  # base64-encoded WAV from the browser
+
+@app.post("/audio/detect", tags=["detection"])
+async def audio_detect(payload: AudioIn, _user: str = Depends(get_current_user)):
+    """Run audio intrusion detection on a base64-encoded WAV chunk from the browser."""
+    if not TORCH_AVAILABLE:
+        return {"intrusion": False, "confidence": 0.0, "note": "torch not installed on server"}
+
+    model = _get_audio_model()
+    if model is None:
+        return {"intrusion": False, "confidence": 0.0, "note": "Audio model not found on server"}
+
+    import io, numpy as np, librosa, torch.nn.functional as F
+
+    wav_bytes = base64.b64decode(payload.audio_b64)
+    waveform, _ = librosa.load(io.BytesIO(wav_bytes), sr=16000, mono=True)
+
+    # Pad or trim to 2 seconds
+    target = 16000 * 2
+    if len(waveform) >= target:
+        waveform = waveform[:target]
+    else:
+        waveform = np.pad(waveform, (0, target - len(waveform)))
+
+    # Mel spectrogram → EfficientNet input
+    mel = librosa.feature.melspectrogram(y=waveform, sr=16000, n_mels=128, hop_length=512)
+    log_mel = librosa.power_to_db(mel, ref=np.max)
+    log_mel = (log_mel - log_mel.min()) / (log_mel.max() - log_mel.min() + 1e-8)
+    tensor = torch.tensor(log_mel, dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+    tensor = F.interpolate(tensor, size=(224, 224), mode="bilinear", align_corners=False)
+    tensor = tensor.squeeze(0).repeat(3, 1, 1).unsqueeze(0)
+
+    with torch.no_grad():
+        prob = float(torch.sigmoid(model(tensor).squeeze()).cpu())
+
+    return {
+        "intrusion": prob > AUDIO_THRESHOLD,
+        "confidence": round(prob, 4),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,9 @@ class TokenResponse(BaseModel):
 class FrameIn(BaseModel):
     frame_b64: str  # base64-encoded JPEG bytes
 
+class AudioIn(BaseModel):
+    audio_b64: str  # base64-encoded WAV bytes
+
 
 class DetectionResult(BaseModel):
     type: str
