@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { Volume2 } from 'lucide-react'
+import { ShieldAlert, Volume2, X } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 
 function authHeaders() {
@@ -21,9 +21,15 @@ interface Props {
   isRunning: boolean
 }
 
+interface AudioPopup {
+  confidence: number
+  timestamp: string
+}
+
 export default function AudioDetect({ isRunning }: Props) {
   const [result, setResult]   = useState<AudioResult | null>(null)
   const [error, setError]     = useState('')
+  const [popup, setPopup]     = useState<AudioPopup | null>(null)
   const lastAlertRef          = useRef<number>(0)
   const mediaRecorderRef      = useRef<MediaRecorder | null>(null)
   const streamRef             = useRef<MediaStream | null>(null)
@@ -82,6 +88,7 @@ export default function AudioDetect({ isRunning }: Props) {
           const now = Date.now()
           if (now - lastAlertRef.current >= ALERT_COOLDOWN) {
             lastAlertRef.current = now
+            setPopup({ confidence: data.confidence, timestamp: data.timestamp })
             await axios.post('/predict', {
               type:       'gunshot',
               confidence: data.confidence,
@@ -157,6 +164,82 @@ export default function AudioDetect({ isRunning }: Props) {
   const isAlert = result?.intrusion === true
 
   return (
+    <>
+    {/* Audio intrusion popup */}
+    {popup && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        onClick={() => setPopup(null)}
+      >
+        <div
+          className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden border-2 border-tut-red/40"
+          onClick={e => e.stopPropagation()}
+        >
+          {/* Red header */}
+          <div className="bg-tut-red px-5 py-4 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <ShieldAlert size={22} className="text-white" />
+              <div>
+                <p className="text-white font-bold text-base leading-tight">INTRUSION SOUND DETECTED</p>
+                <p className="text-white/70 text-xs mt-0.5">
+                  {new Date(popup.timestamp).toLocaleTimeString()}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setPopup(null)}
+              className="text-white/70 hover:text-white p-1.5 rounded-lg hover:bg-white/10 transition-colors"
+            >
+              <X size={18} />
+            </button>
+          </div>
+
+          {/* Icon */}
+          <div className="flex flex-col items-center justify-center py-8 gap-3 bg-tut-red/5">
+            <div className="w-16 h-16 rounded-full bg-tut-red/10 border-2 border-tut-red/20 flex items-center justify-center">
+              <Volume2 size={32} className="text-tut-red" />
+            </div>
+            <p className="text-tut-red font-semibold text-sm">Suspicious audio event captured</p>
+          </div>
+
+          {/* Details */}
+          <div className="px-5 py-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-gray-500 text-sm">Sound type</span>
+              <span className="text-tut-red font-semibold text-sm">Intrusion / Gunshot</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-gray-500 text-sm">Confidence</span>
+              <div className="flex items-center gap-2">
+                <div className="w-24 bg-gray-100 rounded-full h-1.5">
+                  <div
+                    className="h-1.5 rounded-full bg-tut-red"
+                    style={{ width: `${(popup.confidence * 100).toFixed(0)}%` }}
+                  />
+                </div>
+                <span className="text-tut-red font-bold text-sm tabular-nums">
+                  {(popup.confidence * 100).toFixed(0)}%
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-gray-500 text-sm">Alert saved</span>
+              <span className="text-green-600 text-sm font-medium">✓ Recorded</span>
+            </div>
+          </div>
+
+          <div className="px-5 pb-5">
+            <button
+              onClick={() => setPopup(null)}
+              className="w-full bg-tut-red hover:bg-red-700 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+
     <div className={`h-full border rounded-xl p-4 space-y-4 flex flex-col ${isAlert ? 'border-tut-red/30 bg-tut-red/5' : 'border-gray-200 bg-white'}`}>
 
       {/* Header */}
@@ -241,5 +324,6 @@ export default function AudioDetect({ isRunning }: Props) {
         </div>
       )}
     </div>
+    </>
   )
 }
