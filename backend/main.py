@@ -41,7 +41,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from auth import authenticate_user, create_access_token, get_current_user, verify_token
 from database import get_alerts_collection, get_faces_collection
-from models import AlertIn, AlertOut, CameraIn, DeviceConfig, FaceEncoding, FaceIn, FaceOut, FrameIn, TokenResponse
+from models import AlertIn, AudioIn, AlertOut, CameraIn, DeviceConfig, FaceEncoding, FaceIn, FaceOut, FrameIn, TokenResponse
 from sms import send_sms
 
 MEDIA_DIR = Path(__file__).parent / "alerts"
@@ -507,9 +507,6 @@ async def webcam_boxes(
 # ---------------------------------------------------------------------------
 # Browser microphone audio detection
 # ---------------------------------------------------------------------------
-
-class AudioIn(BaseModel):
-    audio_b64: str  # base64-encoded WAV from the browser
 
 @app.post("/audio/detect", tags=["detection"])
 async def audio_detect(payload: AudioIn, _user: str = Depends(get_current_user)):

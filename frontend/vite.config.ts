@@ -17,6 +17,7 @@ export default defineConfig({
       '/upload-video': 'http://localhost:8000',
       '/health': 'http://localhost:8000',
       '/faces': 'http://localhost:8000',
+      '/audio': 'http://localhost:8000',
       '/ws': {
         target: 'ws://localhost:8000',
         ws: true,
