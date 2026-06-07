@@ -13,13 +13,23 @@ build/
 frontend/node_modules/
 frontend/dist/
 
-# ML model weights (large binary files — download separately)
+# ML model weights — exclude training artifacts, include inference models
 *.pt
 *.pth
 *.onnx
 data/
 ml/data_cache/
 ml/runs/
+
+# Allow inference models needed for Pi deployment
+!yolov8s.pt
+!yolov8s-cls.pt
+!ml/models/audio_classifier.pt
+!ml/models/yolov5_crime_cls.pt
+!ml/models/yolov8_crime_cls/weights/best.pt
+!ml/models/yolov8_crime_cls/weights/last.pt
+!ml/yolov8s.pt
+!ml/yolov8s-cls.pt
 
 # Backend generated
 backend/alerts/

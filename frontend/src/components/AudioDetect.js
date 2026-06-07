@@ -1,0 +1,160 @@
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
+import axios from 'axios';
+import { ShieldAlert, Volume2, X } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+function authHeaders() {
+    const token = localStorage.getItem('token');
+    return token ? { Authorization: `Bearer ${token}` } : {};
+}
+const CHUNK_MS = 2000;
+const ALERT_COOLDOWN = 10000;
+const POST_ALERT_PAUSE = 5000;
+const MIN_RMS = 0.04; // ignore audio quieter than this (filters ambient noise)
+export default function AudioDetect({ isRunning }) {
+    const [result, setResult] = useState(null);
+    const [error, setError] = useState('');
+    const [popup, setPopup] = useState(null);
+    const lastAlertRef = useRef(0);
+    const mediaRecorderRef = useRef(null);
+    const streamRef = useRef(null);
+    // Start/stop mic stream when parent toggles isRunning
+    useEffect(() => {
+        if (isRunning) {
+            setError('');
+            setResult(null);
+            startAudio();
+        }
+        else {
+            stopAudio();
+        }
+        return () => stopAudio();
+    }, [isRunning]);
+    function stopAudio() {
+        mediaRecorderRef.current?.stop();
+        streamRef.current?.getTracks().forEach(t => t.stop());
+        streamRef.current = null;
+        mediaRecorderRef.current = null;
+    }
+    async function startAudio() {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            streamRef.current = stream;
+            scheduleChunk(stream);
+        }
+        catch {
+            setError('Microphone access denied.');
+        }
+    }
+    function scheduleChunk(stream) {
+        if (!streamRef.current)
+            return;
+        const recorder = new MediaRecorder(stream);
+        const chunks = [];
+        mediaRecorderRef.current = recorder;
+        recorder.ondataavailable = e => { if (e.data.size > 0)
+            chunks.push(e.data); };
+        recorder.onstop = async () => {
+            if (!streamRef.current)
+                return;
+            let detectedIntrusion = false;
+            try {
+                const blob = new Blob(chunks, { type: recorder.mimeType });
+                const { b64, rms } = await blobToWavBase64(blob);
+                // Skip inference if audio is too quiet — reset to normal and continue
+                if (rms < MIN_RMS) {
+                    setResult(prev => prev?.intrusion ? { intrusion: false, confidence: 0, timestamp: new Date().toISOString() } : prev);
+                    if (streamRef.current)
+                        scheduleChunk(streamRef.current);
+                    return;
+                }
+                const { data } = await axios.post('/audio/detect', { audio_b64: b64 }, { headers: authHeaders() });
+                setResult(data);
+                if (data.intrusion) {
+                    detectedIntrusion = true;
+                    const now = Date.now();
+                    if (now - lastAlertRef.current >= ALERT_COOLDOWN) {
+                        lastAlertRef.current = now;
+                        setPopup({ confidence: data.confidence, timestamp: data.timestamp });
+                        await axios.post('/predict', {
+                            type: 'suspicious_audio',
+                            confidence: data.confidence,
+                            source: 'audio',
+                            timestamp: data.timestamp,
+                        }, { headers: authHeaders() });
+                    }
+                }
+            }
+            catch { /* keep going */ }
+            if (!streamRef.current)
+                return;
+            // After a detection pause to let the room settle before next recording
+            if (detectedIntrusion) {
+                await new Promise(r => setTimeout(r, POST_ALERT_PAUSE));
+            }
+            if (streamRef.current)
+                scheduleChunk(streamRef.current);
+        };
+        recorder.start();
+        setTimeout(() => { if (recorder.state === 'recording')
+            recorder.stop(); }, CHUNK_MS);
+    }
+    /**
+     * Decode any browser audio blob (webm/ogg/mp4) via AudioContext,
+     * resample to 16 kHz mono, and encode as 16-bit PCM WAV base64.
+     * This is what the Python audio model expects.
+     */
+    async function blobToWavBase64(blob) {
+        const arrayBuffer = await blob.arrayBuffer();
+        // Decode compressed audio (WebM/Opus etc.)
+        const decodeCtx = new AudioContext();
+        const decoded = await decodeCtx.decodeAudioData(arrayBuffer);
+        await decodeCtx.close();
+        // Resample to 16 kHz mono
+        const TARGET_SR = 16000;
+        const numSamples = Math.ceil(decoded.duration * TARGET_SR);
+        const offlineCtx = new OfflineAudioContext(1, numSamples, TARGET_SR);
+        const src = offlineCtx.createBufferSource();
+        src.buffer = decoded;
+        src.connect(offlineCtx.destination);
+        src.start(0);
+        const resampled = await offlineCtx.startRendering();
+        // Encode as 16-bit PCM WAV
+        const pcm = resampled.getChannelData(0);
+        const wavBuffer = new ArrayBuffer(44 + pcm.length * 2);
+        const view = new DataView(wavBuffer);
+        const write = (offset, str) => [...str].forEach((c, i) => view.setUint8(offset + i, c.charCodeAt(0)));
+        write(0, 'RIFF');
+        view.setUint32(4, 36 + pcm.length * 2, true);
+        write(8, 'WAVE');
+        write(12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true); // PCM
+        view.setUint16(22, 1, true); // mono
+        view.setUint32(24, TARGET_SR, true);
+        view.setUint32(28, TARGET_SR * 2, true);
+        view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true);
+        write(36, 'data');
+        view.setUint32(40, pcm.length * 2, true);
+        let offset = 44;
+        for (let i = 0; i < pcm.length; i++) {
+            view.setInt16(offset, Math.max(-1, Math.min(1, pcm[i])) * 0x7FFF, true);
+            offset += 2;
+        }
+        // Compute RMS so caller can gate on volume
+        const rms = Math.sqrt(pcm.reduce((sum, s) => sum + s * s, 0) / pcm.length);
+        const bytes = new Uint8Array(wavBuffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++)
+            binary += String.fromCharCode(bytes[i]);
+        return { b64: btoa(binary), rms };
+    }
+    const isAlert = result?.intrusion === true;
+    return (_jsxs(_Fragment, { children: [popup && (_jsx("div", { className: "fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm", onClick: () => setPopup(null), children: _jsxs("div", { className: "bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden border-2 border-tut-red/40", onClick: e => e.stopPropagation(), children: [_jsxs("div", { className: "bg-tut-red px-5 py-4 flex items-center justify-between", children: [_jsxs("div", { className: "flex items-center gap-3", children: [_jsx(ShieldAlert, { size: 22, className: "text-white" }), _jsxs("div", { children: [_jsx("p", { className: "text-white font-bold text-base leading-tight", children: "INTRUSION SOUND DETECTED" }), _jsx("p", { className: "text-white/70 text-xs mt-0.5", children: new Date(popup.timestamp).toLocaleTimeString() })] })] }), _jsx("button", { onClick: () => setPopup(null), className: "text-white/70 hover:text-white p-1.5 rounded-lg hover:bg-white/10 transition-colors", children: _jsx(X, { size: 18 }) })] }), _jsxs("div", { className: "flex flex-col items-center justify-center py-8 gap-3 bg-tut-red/5", children: [_jsx("div", { className: "w-16 h-16 rounded-full bg-tut-red/10 border-2 border-tut-red/20 flex items-center justify-center", children: _jsx(Volume2, { size: 32, className: "text-tut-red" }) }), _jsx("p", { className: "text-tut-red font-semibold text-sm", children: "Suspicious audio event captured" })] }), _jsxs("div", { className: "px-5 py-4 space-y-3", children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsx("span", { className: "text-gray-500 text-sm", children: "Sound type" }), _jsx("span", { className: "text-tut-red font-semibold text-sm", children: "Suspicious Audio" })] }), _jsxs("div", { className: "flex items-center justify-between", children: [_jsx("span", { className: "text-gray-500 text-sm", children: "Confidence" }), _jsxs("div", { className: "flex items-center gap-2", children: [_jsx("div", { className: "w-24 bg-gray-100 rounded-full h-1.5", children: _jsx("div", { className: "h-1.5 rounded-full bg-tut-red", style: { width: `${(popup.confidence * 100).toFixed(0)}%` } }) }), _jsxs("span", { className: "text-tut-red font-bold text-sm tabular-nums", children: [(popup.confidence * 100).toFixed(0), "%"] })] })] }), _jsxs("div", { className: "flex items-center justify-between", children: [_jsx("span", { className: "text-gray-500 text-sm", children: "Alert saved" }), _jsx("span", { className: "text-green-600 text-sm font-medium", children: "\u2713 Recorded" })] })] }), _jsx("div", { className: "px-5 pb-5", children: _jsx("button", { onClick: () => setPopup(null), className: "w-full bg-tut-red hover:bg-red-700 text-white font-semibold py-2.5 rounded-xl text-sm transition-colors", children: "Dismiss" }) })] }) })), _jsxs("div", { className: `h-full border rounded-xl p-4 space-y-4 flex flex-col ${isAlert ? 'border-tut-red/30 bg-tut-red/5' : 'border-gray-200 bg-white'}`, children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx(Volume2, { size: 16, className: isAlert ? 'text-tut-red' : 'text-tut-teal' }), _jsx("h3", { className: "text-sm font-semibold text-tut-teal", children: "Audio Detection" }), isRunning && (_jsxs("span", { className: "ml-auto flex items-center gap-1.5 text-xs text-tut-blue font-medium bg-tut-blue/10 border border-tut-blue/20 px-2.5 py-1 rounded-lg", children: [_jsx("span", { className: "w-1.5 h-1.5 rounded-full bg-tut-blue animate-pulse" }), "Listening"] }))] }), error && (_jsx("p", { className: "text-tut-red text-xs bg-tut-red/5 border border-tut-red/20 rounded-lg px-3 py-2", children: error })), !isRunning && !result && (_jsxs("div", { className: "flex-1 flex flex-col items-center justify-center text-center gap-2 py-8", children: [_jsx(Volume2, { size: 32, className: "text-gray-200" }), _jsx("p", { className: "text-gray-400 text-sm", children: "Audio monitoring inactive" }), _jsx("p", { className: "text-gray-300 text-xs", children: "Press Start Detection to begin" })] })), isRunning && (_jsxs("div", { className: "flex-1 flex flex-col items-center justify-center gap-4", children: [_jsx("div", { className: "flex items-end gap-1 h-20", children: Array.from({ length: 20 }).map((_, i) => (_jsx("div", { className: `w-2 rounded-full animate-pulse ${isAlert ? 'bg-tut-red' : 'bg-tut-blue/60'}`, style: {
+                                        height: `${20 + Math.sin(i * 0.8) * 15 + Math.random() * 20}px`,
+                                        animationDelay: `${i * 0.05}s`,
+                                        animationDuration: `${0.6 + Math.random() * 0.4}s`,
+                                    } }, i))) }), _jsx("p", { className: "text-gray-400 text-xs", children: "Analysing 2-second audio windows\u2026" })] })), result && (_jsxs("div", { className: "space-y-3", children: [_jsxs("div", { children: [_jsx("p", { className: "text-[10px] text-gray-400 uppercase tracking-wide font-semibold mb-1", children: "Last Result" }), _jsx("span", { className: `inline-block px-2.5 py-0.5 rounded-md border text-xs font-semibold ${isAlert
+                                            ? 'bg-tut-red/10 text-tut-red border-tut-red/20'
+                                            : 'bg-green-50 text-green-700 border-green-200'}`, children: isAlert ? '⚠ Suspicious Audio Detected' : 'Normal — No Threat' })] }), _jsxs("div", { children: [_jsxs("div", { className: "flex items-center justify-between mb-1", children: [_jsx("p", { className: "text-[10px] text-gray-400 uppercase tracking-wide font-semibold", children: "Confidence" }), _jsxs("span", { className: "text-xs font-bold tabular-nums text-tut-teal", children: [(result.confidence * 100).toFixed(1), "%"] })] }), _jsx("div", { className: "w-full bg-gray-100 rounded-full h-2", children: _jsx("div", { className: `h-2 rounded-full transition-all ${isAlert ? 'bg-tut-red' : 'bg-tut-blue'}`, style: { width: `${(result.confidence * 100).toFixed(0)}%` } }) })] }), result.note && (_jsx("p", { className: "text-[10px] text-gray-400 italic", children: result.note }))] }))] })] }));
+}
